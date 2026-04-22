@@ -197,54 +197,166 @@ jobs:
           do-sca-scan: 'true'
           do-pr-comment: ${{ github.event_name == 'pull_request' }}
 
-      - name: Install Fortify CLI
-        shell: bash
-        run: |
-          archive="${RUNNER_TEMP}/fcli-linux.tgz"
-          install_root="${RUNNER_TEMP}/fortify-fcli"
-          curl -fsSL https://github.com/fortify/fcli/releases/latest/download/fcli-linux.tgz -o "${archive}"
-          mkdir -p "${install_root}"
-          tar -xzf "${archive}" -C "${install_root}"
-          fcli_bin="$(find "${install_root}" -type f -name fcli | head -n 1)"
-          if [ -z "${fcli_bin}" ]; then
-            echo "Unable to locate fcli after extraction." >&2
-            exit 1
-          fi
-          chmod +x "${fcli_bin}"
-          echo "$(dirname "${fcli_bin}")" >> "${GITHUB_PATH}"
-
       - name: Resolve FoD release id
         id: resolve-release
-        shell: bash
         env:
-          FOD_URL: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
+          FOD_BASE_URL: ${{ vars.FOD_BASE_URL || 'https://api.ams.fortify.com' }}
           FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
           FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
           FOD_TENANT: ${{ secrets.FOD_TENANT || '' }}
+          FOD_OAUTH_SCOPE: ${{ vars.FOD_OAUTH_SCOPE || 'api-tenant' }}
           FOD_RELEASE_NAME: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, needs.resolve-pr-context.outputs.base_ref) }}
         run: |
-          export FCLI_HOME="${RUNNER_TEMP}/fcli-home"
-          mkdir -p "${FCLI_HOME}"
+          python <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
 
-          login_args=(
-            --url "${FOD_URL}"
-            --client-id "${FOD_CLIENT_ID}"
-            --client-secret "${FOD_CLIENT_SECRET}"
+          base_url = os.environ["FOD_BASE_URL"].rstrip("/")
+          release_name = os.environ["FOD_RELEASE_NAME"].strip()
+          client_id = os.environ["FOD_CLIENT_ID"]
+          client_secret = os.environ["FOD_CLIENT_SECRET"]
+          oauth_scope = os.environ.get("FOD_OAUTH_SCOPE", "api-tenant")
+
+          if not release_name:
+              raise SystemExit("FOD release name is empty; cannot resolve release id.")
+
+          token_form = {
+              "grant_type": "client_credentials",
+              "scope": oauth_scope,
+              "client_id": client_id,
+              "client_secret": client_secret,
+          }
+          token_request = urllib.request.Request(
+              f"{base_url}/oauth/token",
+              data=urllib.parse.urlencode(token_form).encode("utf-8"),
+              headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
           )
-          if [ -n "${FOD_TENANT}" ]; then
-            login_args+=(--tenant "${FOD_TENANT}")
-          fi
 
-          trap 'fcli fod session logout >/dev/null 2>&1 || true' EXIT
-          fcli fod session login "${login_args[@]}" >/dev/null
+          try:
+              with urllib.request.urlopen(token_request) as response:
+                  token_payload = json.load(response)
+          except urllib.error.HTTPError as exc:
+              details = exc.read().decode("utf-8", errors="replace")
+              raise SystemExit(f"FoD authentication failed while resolving release id: {details}") from exc
 
-          release_id="$(fcli fod release get "${FOD_RELEASE_NAME}" -o 'expr={releaseId}')"
-          if [ -z "${release_id}" ]; then
-            echo "Unable to resolve FoD release id for ${FOD_RELEASE_NAME}." >&2
-            exit 1
-          fi
+          access_token = token_payload.get("access_token")
+          if not access_token:
+              raise SystemExit("FoD authentication succeeded but no access_token was returned.")
 
-          echo "release-id=${release_id}" >> "${GITHUB_OUTPUT}"
+          target_parts = release_name.split(":")
+          target_app = target_parts[0].strip() if len(target_parts) >= 2 else ""
+          target_release = target_parts[-1].strip()
+          target_microservice = target_parts[1].strip() if len(target_parts) == 3 else ""
+
+          def build_candidates(item: dict) -> set[str]:
+              candidates = set()
+              application_name = (
+                  item.get("applicationName")
+                  or item.get("application", {}).get("applicationName")
+                  or item.get("application", {}).get("name")
+                  or ""
+              )
+              microservice_name = (
+                  item.get("microserviceName")
+                  or item.get("microservice", {}).get("microserviceName")
+                  or item.get("microservice", {}).get("name")
+                  or ""
+              )
+              current_release_name = item.get("releaseName") or item.get("name") or ""
+
+              for value in (current_release_name, item.get("releaseFullName"), item.get("displayName")):
+                  if value:
+                      candidates.add(str(value).strip())
+              if application_name and current_release_name:
+                  candidates.add(f"{application_name}:{current_release_name}")
+              if application_name and microservice_name and current_release_name:
+                  candidates.add(f"{application_name}:{microservice_name}:{current_release_name}")
+              return {candidate for candidate in candidates if candidate}
+
+          offset = 0
+          limit = 100
+          matched_release_id = None
+          sampled_items: list[dict] = []
+
+          while True:
+              query = urllib.parse.urlencode({"offset": offset, "limit": limit})
+              releases_request = urllib.request.Request(
+                  f"{base_url}/api/v3/releases?{query}",
+                  headers={
+                      "Accept": "application/json",
+                      "Authorization": f"Bearer {access_token}",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(releases_request) as response:
+                      payload = json.load(response)
+              except urllib.error.HTTPError as exc:
+                  details = exc.read().decode("utf-8", errors="replace")
+                  raise SystemExit(f"FoD release lookup failed: {details}") from exc
+
+              items = payload.get("items") if isinstance(payload, dict) else payload
+              if not isinstance(items, list):
+                  raise SystemExit(f"Unexpected FoD releases payload shape: {json.dumps(payload)[:800]}")
+              if not items:
+                  break
+
+              if not sampled_items:
+                  sampled_items = items[:3]
+
+              for item in items:
+                  candidates = build_candidates(item)
+                  if release_name in candidates:
+                      matched_release_id = item.get("releaseId") or item.get("id")
+                  else:
+                      item_release = (item.get("releaseName") or item.get("name") or "").strip()
+                      item_app = (
+                          item.get("applicationName")
+                          or item.get("application", {}).get("applicationName")
+                          or item.get("application", {}).get("name")
+                          or ""
+                      ).strip()
+                      item_microservice = (
+                          item.get("microserviceName")
+                          or item.get("microservice", {}).get("microserviceName")
+                          or item.get("microservice", {}).get("name")
+                          or ""
+                      ).strip()
+                      if item_release == target_release and (
+                          not target_app or item_app == target_app
+                      ) and (
+                          not target_microservice or item_microservice == target_microservice
+                      ):
+                          matched_release_id = item.get("releaseId") or item.get("id")
+
+                  if matched_release_id:
+                      with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                          fh.write(f"release-id={matched_release_id}\n")
+                      raise SystemExit(0)
+
+              total_count = payload.get("totalCount") if isinstance(payload, dict) else None
+              offset += len(items)
+              if total_count is not None and offset >= int(total_count):
+                  break
+
+          sample = []
+          for item in sampled_items:
+              sample.append(
+                  {
+                      "releaseId": item.get("releaseId") or item.get("id"),
+                      "applicationName": item.get("applicationName") or item.get("application", {}).get("name"),
+                      "microserviceName": item.get("microserviceName") or item.get("microservice", {}).get("name"),
+                      "releaseName": item.get("releaseName") or item.get("name"),
+                  }
+              )
+          raise SystemExit(
+              "Unable to resolve FoD release id for "
+              f"{release_name}. Sample releases returned by FoD: {json.dumps(sample)}"
+          )
+          PY
 
   fortify-aviator-remediation:
     needs: [resolve-pr-context, fortify-fod]
