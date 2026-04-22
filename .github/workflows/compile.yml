@@ -172,6 +172,9 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore ./dvcsharp-core-api.csproj
 
+      - name: Build application binaries for FoD packaging
+        run: dotnet build ./dvcsharp-core-api.csproj --configuration Release --no-restore
+
       - name: Run Fortify on Demand scan
         uses: appsecai-source/fortify-aviator-remediation-action/fod-scan@main
         with:
@@ -187,7 +190,7 @@ jobs:
           sast-assessment-type: ${{ vars.FOD_SAST_ASSESSMENT_TYPE || '' }}
           do-aviator-audit: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
           override-sast-settings: ${{ vars.FOD_OVERRIDE_SAST_SETTINGS || 'false' }}
-          package-extra-opts: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '' }}
+          package-extra-opts: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '-bt dotnet -bf dvcsharp-core-api.csproj' }}
           do-wait: 'true'
           do-job-summary: ${{ vars.FOD_DO_JOB_SUMMARY || 'false' }}
           do-export: 'false'
