@@ -182,7 +182,7 @@ jobs:
           fod-release: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, needs.resolve-pr-context.outputs.base_ref) }}
           do-setup: ${{ vars.FOD_DO_SETUP || 'true' }}
           fod-app-owner: ${{ vars.FOD_APP_OWNER || '' }}
-          auto-required-attrs: ${{ vars.FOD_AUTO_REQUIRED_ATTRS || 'true' }}
+          #auto-required-attrs: ${{ vars.FOD_AUTO_REQUIRED_ATTRS || 'true' }}
           copy-from-release: ${{ vars.FOD_COPY_FROM_RELEASE || '' }}
           sast-assessment-type: ${{ vars.FOD_SAST_ASSESSMENT_TYPE || '' }}
           do-aviator-audit: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
