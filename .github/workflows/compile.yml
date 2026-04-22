@@ -1,28 +1,266 @@
-name: Compile
+name: Fortify FoD Scan and Aviator Remediation
 
 on:
   push:
+    branches: [main, dev]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE'
+      - '.gitignore'
+      - 'provisioning'
+      - '.sonarcloud.properties'
+      - 'LICENSE'
+      - 'Vagrantfile'
   pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE'
+      - '.gitignore'
+      - 'provisioning'
+      - '.sonarcloud.properties'
+      - 'LICENSE'
+      - 'Vagrantfile'
   workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to scan and remediate; leave blank to use the selected branch
+        required: false
+        default: ''
 
-permissions:
-  contents: read
+concurrency:
+  group: fortify-${{ github.workflow }}-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-
+    name: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up .NET SDK
+      - name: Set up .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: '8.0.x'
 
       - name: Restore dependencies
         run: dotnet restore ./dvcsharp-core-api.csproj
 
       - name: Build
         run: dotnet build ./dvcsharp-core-api.csproj --configuration Release --no-restore
+
+  resolve-pr-context:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      has_pr_context: ${{ steps.resolve.outputs.has_pr_context }}
+      is_same_repo_pr: ${{ steps.resolve.outputs.is_same_repo_pr }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+      base_ref: ${{ steps.resolve.outputs.base_ref }}
+      run_remediation: ${{ steps.resolve.outputs.run_remediation }}
+    steps:
+      - id: resolve
+        name: Resolve PR context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          WORKFLOW_DISPATCH_BRANCH: ${{ github.event.inputs.branch || '' }}
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          with open(os.environ["GITHUB_EVENT_PATH"], "r", encoding="utf-8") as fh:
+              payload = json.load(fh)
+
+          repo_full_name = os.environ["GITHUB_REPOSITORY"]
+          owner, repo = repo_full_name.split("/", 1)
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          github_ref = os.environ.get("GITHUB_REF", "")
+          checkout_ref = os.environ.get("GITHUB_SHA", "")
+          default_branch = payload.get("repository", {}).get("default_branch") or "main"
+          manual_branch = os.environ.get("WORKFLOW_DISPATCH_BRANCH", "").strip()
+          pr = None
+
+          if github_ref.startswith("refs/heads/"):
+              base_ref = github_ref[len("refs/heads/"):]
+          else:
+              base_ref = default_branch
+
+          def github_get(path: str) -> dict:
+              request = urllib.request.Request(
+                  f"{os.environ['GH_API_URL'].rstrip('/')}{path}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  details = exc.read().decode("utf-8", errors="replace")
+                  print(f"Failed to query GitHub API at {path}: {details}", file=sys.stderr)
+                  raise
+
+          if event_name == "pull_request":
+              pr = payload.get("pull_request")
+              if pr:
+                  checkout_ref = pr["head"]["sha"]
+                  base_ref = pr["base"]["ref"]
+          elif event_name == "workflow_dispatch":
+              branch = manual_branch or base_ref
+              encoded_branch = urllib.parse.quote(branch, safe="")
+              branch_data = github_get(f"/repos/{owner}/{repo}/branches/{encoded_branch}")
+              checkout_ref = branch_data["commit"]["sha"]
+              base_ref = branch
+
+          has_pr_context = pr is not None
+          outputs = {
+              "has_pr_context": str(has_pr_context).lower(),
+              "pr_number": str(pr["number"]) if has_pr_context else "",
+              "checkout_ref": checkout_ref,
+              "base_ref": base_ref,
+              "run_remediation": str(bool(base_ref)).lower(),
+              "is_same_repo_pr": str(
+                  pr["head"]["repo"]["full_name"] == repo_full_name if has_pr_context else True
+              ).lower(),
+          }
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              for key, value in outputs.items():
+                  fh.write(f"{key}={value}\n")
+          PY
+
+  fortify-fod:
+    needs: [build, resolve-pr-context]
+    if: needs.resolve-pr-context.outputs.is_same_repo_pr == 'true'
+    name: fortify-fod
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      security-events: write
+    outputs:
+      release_id: ${{ steps.resolve-release.outputs.release-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-pr-context.outputs.checkout_ref || github.sha }}
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore ./dvcsharp-core-api.csproj
+
+      - name: Run Fortify on Demand scan
+        uses: ./.github/actions/fod-scan
+        with:
+          fod-url: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
+          fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+          fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-tenant: ${{ secrets.FOD_TENANT || '' }}
+          fod-release: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, needs.resolve-pr-context.outputs.base_ref) }}
+          do-setup: ${{ vars.FOD_DO_SETUP || 'true' }}
+          fod-app-owner: ${{ vars.FOD_APP_OWNER || '' }}
+          auto-required-attrs: ${{ vars.FOD_AUTO_REQUIRED_ATTRS || 'true' }}
+          copy-from-release: ${{ vars.FOD_COPY_FROM_RELEASE || '' }}
+          sast-assessment-type: ${{ vars.FOD_SAST_ASSESSMENT_TYPE || '' }}
+          do-aviator-audit: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
+          override-sast-settings: ${{ vars.FOD_OVERRIDE_SAST_SETTINGS || 'false' }}
+          package-extra-opts: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '' }}
+          do-wait: 'true'
+          do-job-summary: ${{ vars.FOD_DO_JOB_SUMMARY || 'false' }}
+          do-export: 'false'
+          do-sca-scan: 'true'
+          do-pr-comment: ${{ github.event_name == 'pull_request' }}
+
+      - name: Resolve FoD release id
+        id: resolve-release
+        shell: bash
+        env:
+          FOD_URL: ${{ vars.FOD_BASE_URL || vars.FOD_URL || 'https://ams.fortify.com' }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          FOD_RELEASE_NAME: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, needs.resolve-pr-context.outputs.base_ref) }}
+        run: |
+          if ! command -v fcli >/dev/null 2>&1; then
+            echo "fcli was not found on PATH after the FoD scan step." >&2
+            exit 1
+          fi
+
+          export FCLI_STATE_DIR="${RUNNER_TEMP}/fcli"
+          mkdir -p "${FCLI_STATE_DIR}"
+          trap 'fcli fod session logout >/dev/null 2>&1 || true' EXIT
+
+          fcli fod session login \
+            --url "${FOD_URL}" \
+            --client-id "${FOD_CLIENT_ID}" \
+            --client-secret "${FOD_CLIENT_SECRET}" \
+            >/dev/null
+
+          release_id="$(fcli fod release get "${FOD_RELEASE_NAME}" -o 'expr={releaseId}')"
+          if [ -z "${release_id}" ]; then
+            echo "Unable to resolve FoD release id for ${FOD_RELEASE_NAME}." >&2
+            exit 1
+          fi
+
+          echo "release-id=${release_id}" >> "${GITHUB_OUTPUT}"
+
+  fortify-aviator-remediation:
+    needs: [resolve-pr-context, build, fortify-fod]
+    if: needs.resolve-pr-context.outputs.run_remediation == 'true' && needs.resolve-pr-context.outputs.is_same_repo_pr == 'true' && needs.fortify-fod.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-pr-context.outputs.checkout_ref }}
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run Fortify Aviator remediation action
+        uses: ./.github/actions/fortify-aviator-remediation
+        with:
+          fod-base-url: ${{ vars.FOD_BASE_URL || 'https://api.ams.fortify.com' }}
+          fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+          fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-tenant: ${{ secrets.FOD_TENANT || '' }}
+          fod-user: ${{ secrets.FOD_USER || '' }}
+          fod-password: ${{ secrets.FOD_PASSWORD || secrets.FOD_PAT || '' }}
+          fod-oauth-scope: ${{ vars.FOD_OAUTH_SCOPE || 'api-tenant' }}
+          fod-release-id: ${{ needs.fortify-fod.outputs.release_id }}
+          fod-severity-strings: ${{ vars.FOD_SEVERITY_STRINGS || 'medium' }}
+          fod-pr-grouping: ${{ vars.FOD_PR_GROUPING || 'category' }}
+          fod-verify-ssl: ${{ vars.FOD_VERIFY_SSL || 'true' }}
+          remediation-validate-command: ${{ vars.REMEDIATION_VALIDATE_COMMAND || 'dotnet build ./dvcsharp-core-api.csproj --configuration Release' }}
+          github-token: ${{ github.token }}
+          github-repository: ${{ github.repository }}
+          pr-number: ${{ needs.resolve-pr-context.outputs.pr_number }}
+          github-base-ref: ${{ needs.resolve-pr-context.outputs.base_ref }}
