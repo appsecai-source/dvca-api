@@ -182,7 +182,8 @@ jobs:
           fod-release: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, needs.resolve-pr-context.outputs.base_ref) }}
           do-setup: ${{ vars.FOD_DO_SETUP || 'true' }}
           fod-app-owner: ${{ vars.FOD_APP_OWNER || '' }}
-          #copy-from-release: ${{ vars.FOD_COPY_FROM_RELEASE || '' }}
+          auto-required-attrs: ${{ vars.FOD_AUTO_REQUIRED_ATTRS || 'true' }}
+          copy-from-release: ${{ vars.FOD_COPY_FROM_RELEASE || '' }}
           sast-assessment-type: ${{ vars.FOD_SAST_ASSESSMENT_TYPE || '' }}
           do-aviator-audit: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
           override-sast-settings: ${{ vars.FOD_OVERRIDE_SAST_SETTINGS || 'false' }}
@@ -226,7 +227,7 @@ jobs:
           echo "release-id=${release_id}" >> "${GITHUB_OUTPUT}"
 
   fortify-aviator-remediation:
-    needs: [resolve-pr-context, build, fortify-fod]
+    needs: [resolve-pr-context, fortify-fod]
     if: needs.resolve-pr-context.outputs.run_remediation == 'true' && needs.resolve-pr-context.outputs.is_same_repo_pr == 'true' && needs.fortify-fod.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -245,20 +246,23 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Run Fortify Aviator remediation action
-        uses: ./.github/actions/fortify-aviator-remediation
+        uses: appsecai-source/fortify-aviator-remediation-action@main
         with:
           fod-base-url: ${{ vars.FOD_BASE_URL || 'https://api.ams.fortify.com' }}
           fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
           fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-          fod-tenant: ${{ secrets.FOD_TENANT || '' }}
-          fod-user: ${{ secrets.FOD_USER || '' }}
-          fod-password: ${{ secrets.FOD_PASSWORD || secrets.FOD_PAT || '' }}
+          fod-tenant: ${{ secrets.FOD_TENANT }}
+          fod-user: ${{ secrets.FOD_USER }}
+          fod-password: ${{ secrets.FOD_PASSWORD || secrets.FOD_PAT }}
           fod-oauth-scope: ${{ vars.FOD_OAUTH_SCOPE || 'api-tenant' }}
-          fod-release-id: ${{ needs.fortify-fod.outputs.release_id }}
+          fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
           fod-severity-strings: ${{ vars.FOD_SEVERITY_STRINGS || 'medium' }}
           fod-pr-grouping: ${{ vars.FOD_PR_GROUPING || 'category' }}
           fod-verify-ssl: ${{ vars.FOD_VERIFY_SSL || 'true' }}
           remediation-validate-command: ${{ vars.REMEDIATION_VALIDATE_COMMAND || 'dotnet build ./dvcsharp-core-api.csproj --configuration Release' }}
+          setup-java: 'true'
+          java-version: '8'
+          java-distribution: temurin
           github-token: ${{ github.token }}
           github-repository: ${{ github.repository }}
           pr-number: ${{ needs.resolve-pr-context.outputs.pr_number }}
