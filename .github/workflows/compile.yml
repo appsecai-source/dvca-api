@@ -197,29 +197,46 @@ jobs:
           do-sca-scan: 'true'
           do-pr-comment: ${{ github.event_name == 'pull_request' }}
 
+      - name: Install Fortify CLI
+        shell: bash
+        run: |
+          archive="${RUNNER_TEMP}/fcli-linux.tgz"
+          install_root="${RUNNER_TEMP}/fortify-fcli"
+          curl -fsSL https://github.com/fortify/fcli/releases/latest/download/fcli-linux.tgz -o "${archive}"
+          mkdir -p "${install_root}"
+          tar -xzf "${archive}" -C "${install_root}"
+          fcli_bin="$(find "${install_root}" -type f -name fcli | head -n 1)"
+          if [ -z "${fcli_bin}" ]; then
+            echo "Unable to locate fcli after extraction." >&2
+            exit 1
+          fi
+          chmod +x "${fcli_bin}"
+          echo "$(dirname "${fcli_bin}")" >> "${GITHUB_PATH}"
+
       - name: Resolve FoD release id
         id: resolve-release
         shell: bash
         env:
-          FOD_URL: ${{ vars.FOD_BASE_URL || vars.FOD_URL || 'https://ams.fortify.com' }}
+          FOD_URL: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
           FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
           FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          FOD_TENANT: ${{ secrets.FOD_TENANT || '' }}
           FOD_RELEASE_NAME: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, needs.resolve-pr-context.outputs.base_ref) }}
         run: |
-          if ! command -v fcli >/dev/null 2>&1; then
-            echo "fcli was not found on PATH after the FoD scan step." >&2
-            exit 1
+          export FCLI_HOME="${RUNNER_TEMP}/fcli-home"
+          mkdir -p "${FCLI_HOME}"
+
+          login_args=(
+            --url "${FOD_URL}"
+            --client-id "${FOD_CLIENT_ID}"
+            --client-secret "${FOD_CLIENT_SECRET}"
+          )
+          if [ -n "${FOD_TENANT}" ]; then
+            login_args+=(--tenant "${FOD_TENANT}")
           fi
 
-          export FCLI_STATE_DIR="${RUNNER_TEMP}/fcli"
-          mkdir -p "${FCLI_STATE_DIR}"
           trap 'fcli fod session logout >/dev/null 2>&1 || true' EXIT
-
-          fcli fod session login \
-            --url "${FOD_URL}" \
-            --client-id "${FOD_CLIENT_ID}" \
-            --client-secret "${FOD_CLIENT_SECRET}" \
-            >/dev/null
+          fcli fod session login "${login_args[@]}" >/dev/null
 
           release_id="$(fcli fod release get "${FOD_RELEASE_NAME}" -o 'expr={releaseId}')"
           if [ -z "${release_id}" ]; then
@@ -258,7 +275,7 @@ jobs:
           fod-user: ${{ secrets.FOD_USER }}
           fod-password: ${{ secrets.FOD_PASSWORD || secrets.FOD_PAT }}
           fod-oauth-scope: ${{ vars.FOD_OAUTH_SCOPE || 'api-tenant' }}
-          fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+          fod-release-id: ${{ needs.fortify-fod.outputs.release_id }}
           fod-severity-strings: ${{ vars.FOD_SEVERITY_STRINGS || 'critical' }}
           fod-pr-grouping: ${{ vars.FOD_PR_GROUPING || 'category' }}
           fod-verify-ssl: ${{ vars.FOD_VERIFY_SSL || 'true' }}
