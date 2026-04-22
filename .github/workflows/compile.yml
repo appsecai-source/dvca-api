@@ -173,7 +173,7 @@ jobs:
         run: dotnet restore ./dvcsharp-core-api.csproj
 
       - name: Run Fortify on Demand scan
-        uses: ./.github/actions/fod-scan
+        uses: appsecai-source/fortify-aviator-remediation-action/fod-scan@main
         with:
           fod-url: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
           fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
