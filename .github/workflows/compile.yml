@@ -191,7 +191,7 @@ jobs:
           do-aviator-audit: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
           override-sast-settings: ${{ vars.FOD_OVERRIDE_SAST_SETTINGS || 'false' }}
           package-extra-opts: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '-bt dotnet -bf dvcsharp-core-api.csproj' }}
-          do-wait: 'true'
+          do-wait: 'false'
           do-job-summary: ${{ vars.FOD_DO_JOB_SUMMARY || 'false' }}
           do-export: 'false'
           do-sca-scan: 'true'
@@ -259,7 +259,7 @@ jobs:
           fod-password: ${{ secrets.FOD_PASSWORD || secrets.FOD_PAT }}
           fod-oauth-scope: ${{ vars.FOD_OAUTH_SCOPE || 'api-tenant' }}
           fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
-          fod-severity-strings: ${{ vars.FOD_SEVERITY_STRINGS || 'medium' }}
+          fod-severity-strings: ${{ vars.FOD_SEVERITY_STRINGS || 'critical' }}
           fod-pr-grouping: ${{ vars.FOD_PR_GROUPING || 'category' }}
           fod-verify-ssl: ${{ vars.FOD_VERIFY_SSL || 'true' }}
           remediation-validate-command: ${{ vars.REMEDIATION_VALIDATE_COMMAND || 'dotnet build ./dvcsharp-core-api.csproj --configuration Release' }}
