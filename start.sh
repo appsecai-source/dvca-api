@@ -1,6 +1,5 @@
 #!/bin/bash
 
-dotnet ef database update
+set -e
+
 dotnet watch run
-
-

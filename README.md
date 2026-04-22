@@ -12,14 +12,13 @@ docker-compose up
 
 ### Manual
 
-Install .NET Core 2.x SDK
-[Microsoft .NET Core SDK](https://www.microsoft.com/net/download/macos)
+Install the .NET 8 SDK
+[Microsoft .NET SDK](https://dotnet.microsoft.com/download)
 
-Install dependencies and migrate database:
+Restore dependencies:
 
 ```
 dotnet restore
-dotnet ef database update
 ```
 
 Start application server:
@@ -33,6 +32,9 @@ Start application server with watcher for auto-reload on change:
 ```
 dotnet watch run
 ```
+
+The app now applies EF Core migrations on startup, so you do not need to run
+`dotnet ef database update` just to start it.
 
 ## Build Docker
 
