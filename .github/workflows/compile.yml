@@ -31,12 +31,15 @@ jobs:
       - name: Resolve FoD release ID
         id: fod
         run: |
+          APP_NAME="${GITHUB_REPOSITORY}"
+          RELEASE_NAME="${GITHUB_REF_NAME}"
+
           RELEASE_ID=$(fcli fod release list \
-            --app "${{ vars.FOD_APP }}" \
-            -o expr='records.?[name=="${{ vars.FOD_RELEASE }}"][0].releaseId')
+            --app "${APP_NAME}" \
+            -o expr="records.?[name=='${RELEASE_NAME}'][0].releaseId")
 
           if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-            echo "Could not resolve FoD release ID"
+            echo "Could not resolve FoD release ID for app '${APP_NAME}' and release '${RELEASE_NAME}'"
             exit 1
           fi
 
@@ -132,8 +135,8 @@ jobs:
           body: |
             Fortify Aviator generated source-code remediation changes from the FoD release:
 
-            Application: ${{ vars.FOD_APP }}
-            Release: ${{ vars.FOD_RELEASE }}
+            Application: ${{ github.repository }}
+            Release: ${{ github.ref_name }}
             FoD Release ID: ${{ steps.fod.outputs.release_id }}
 
             Automated validation completed before this PR was created:
