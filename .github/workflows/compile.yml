@@ -45,13 +45,32 @@ jobs:
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Apply Aviator remediations from FoD
+        id: apply
         run: |
+          set +e
           fcli fod aviator apply-remediations \
             --rel "${{ steps.fod.outputs.release_id }}" \
-            --source-dir "$GITHUB_WORKSPACE"
+            --source-dir "$GITHUB_WORKSPACE" \
+            2>&1 | tee "$RUNNER_TEMP/fod-aviator-remediation.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "remediations_available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if grep -q "does not contain remediations.xml file" "$RUNNER_TEMP/fod-aviator-remediation.log"; then
+            echo "No Aviator remediation bundle is available for FoD release ${{ steps.fod.outputs.release_id }} yet."
+            echo "remediations_available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          exit "$status"
 
       - name: Check whether remediation changed files
         id: changes
+        if: steps.apply.outputs.remediations_available != 'false'
         run: |
           if git diff --quiet; then
             echo "No remediation changes were generated."
@@ -79,6 +98,8 @@ jobs:
             echo "type=gradle" >> "$GITHUB_OUTPUT"
           elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then
             echo "type=python" >> "$GITHUB_OUTPUT"
+          elif ls *.csproj >/dev/null 2>&1 || ls *.sln >/dev/null 2>&1; then
+            echo "type=dotnet" >> "$GITHUB_OUTPUT"
           else
             echo "type=unknown" >> "$GITHUB_OUTPUT"
           fi
@@ -115,6 +136,11 @@ jobs:
             pip install .
           fi
           python -m pytest
+
+      - name: Run .NET build
+        if: steps.changes.outputs.has_changes == 'true' && steps.project.outputs.type == 'dotnet'
+        run: |
+          dotnet build ./dvcsharp-core-api.csproj --configuration Release
 
       - name: Fail if project type is unknown
         if: steps.changes.outputs.has_changes == 'true' && steps.project.outputs.type == 'unknown'
