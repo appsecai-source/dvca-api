@@ -31,15 +31,14 @@ jobs:
       - name: Resolve FoD release ID
         id: fod
         run: |
-          APP_NAME="${GITHUB_REPOSITORY}"
-          RELEASE_NAME="${GITHUB_REF_NAME}"
+          QUALIFIED_RELEASE="${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
 
-          RELEASE_ID=$(fcli fod release list \
-            --app "${APP_NAME}" \
-            -o expr="records.?[name=='${RELEASE_NAME}'][0].releaseId")
+          RELEASE_ID=$(fcli fod release get \
+            "${QUALIFIED_RELEASE}" \
+            -o expr='{releaseId}')
 
           if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-            echo "Could not resolve FoD release ID for app '${APP_NAME}' and release '${RELEASE_NAME}'"
+            echo "Could not resolve FoD release ID for '${QUALIFIED_RELEASE}'"
             exit 1
           fi
 
