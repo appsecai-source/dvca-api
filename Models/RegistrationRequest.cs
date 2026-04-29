@@ -14,10 +14,12 @@ namespace dvcsharp_core_api.Models
       public string email { get; set; }
 
       [Required]
-      public string password { get; set; }
+      [DataType(DataType.Password)]
+      public string password { get; set; } // L17
 
       [Compare("password", ErrorMessage = "The passwords do not match.")]
       [Required]
-      public string passwordConfirmation { get; set; }
+      [DataType(DataType.Password)]
+      public string passwordConfirmation { get; set; } // L21
    }
 }
