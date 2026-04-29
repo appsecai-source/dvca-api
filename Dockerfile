@@ -9,6 +9,10 @@ WORKDIR /app
 
 RUN dotnet restore ./dvcsharp-core-api.csproj
 
+RUN groupadd -r appuser && useradd -r -g appuser appuser && chown -R appuser:appuser /app
+
+USER appuser
+
 EXPOSE 5000
 
 CMD ["bash", "./start.sh"]

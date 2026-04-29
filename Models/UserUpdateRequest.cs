@@ -17,6 +17,7 @@ namespace dvcsharp_core_api.Models
       public string role { get; set; }
 
       [Required]
+      [DataType(DataType.Password)]
       public string password { get; set; }
 
       [Compare("password", ErrorMessage = "The passwords do not match.")]
