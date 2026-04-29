@@ -28,45 +28,194 @@ jobs:
             --client-id "${{ secrets.FOD_CLIENT_ID }}" \
             --client-secret "${{ secrets.FOD_CLIENT_SECRET }}"
 
-      - name: Resolve FoD release ID
+      - name: Resolve FoD scan and release IDs
         id: fod
+        env:
+          FOD_APP_NAME: ${{ github.repository }}
+          FOD_RELEASE_NAME: ${{ github.ref_name }}
+          FOD_SCAN_CANDIDATES_FILE: ${{ runner.temp }}/fod-scan-candidates.json
         run: |
-          QUALIFIED_RELEASE="${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
+          python <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
 
-          RELEASE_ID=$(fcli fod release get \
-            "${QUALIFIED_RELEASE}" \
-            -o expr='{releaseId}')
+          app_name = os.environ["FOD_APP_NAME"]
+          release_name = os.environ["FOD_RELEASE_NAME"]
+          candidates_file = os.environ["FOD_SCAN_CANDIDATES_FILE"]
 
-          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-            echo "Could not resolve FoD release ID for '${QUALIFIED_RELEASE}'"
-            exit 1
-          fi
+          completed = subprocess.run(
+              ["fcli", "fod", "app", "list-scans", "--app", app_name, "-o", "json"],
+              capture_output=True,
+              text=True,
+          )
+          if completed.returncode != 0:
+              sys.stderr.write(completed.stderr or completed.stdout)
+              raise SystemExit(completed.returncode)
 
-          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          payload = json.loads(completed.stdout)
+          if isinstance(payload, dict):
+              items = payload.get("items") or payload.get("records") or payload.get("data") or []
+          else:
+              items = payload
+
+          if not isinstance(items, list):
+              raise SystemExit(f"Unexpected FoD scan list payload: {json.dumps(payload)[:1000]}")
+
+          def nested_get(item, *path):
+              current = item
+              for key in path:
+                  if not isinstance(current, dict):
+                      return None
+                  current = current.get(key)
+              return current
+
+          def scan_release_name(item):
+              for candidate in (
+                  item.get("releaseName"),
+                  item.get("release", {}).get("name") if isinstance(item.get("release"), dict) else None,
+                  item.get("release", {}).get("releaseName") if isinstance(item.get("release"), dict) else None,
+                  nested_get(item, "release", "release", "name"),
+              ):
+                  if candidate:
+                      return str(candidate).strip()
+              return ""
+
+          def scan_release_id(item):
+              for candidate in (
+                  item.get("releaseId"),
+                  item.get("release", {}).get("releaseId") if isinstance(item.get("release"), dict) else None,
+                  item.get("release", {}).get("id") if isinstance(item.get("release"), dict) else None,
+                  nested_get(item, "release", "releaseId"),
+                  nested_get(item, "release", "id"),
+              ):
+                  if candidate is not None and str(candidate).strip():
+                      return str(candidate).strip()
+              return ""
+
+          def scan_id(item):
+              for candidate in (
+                  item.get("scanId"),
+                  item.get("id"),
+                  item.get("scan", {}).get("scanId") if isinstance(item.get("scan"), dict) else None,
+                  nested_get(item, "scan", "id"),
+              ):
+                  if candidate is not None and str(candidate).strip():
+                      return str(candidate).strip()
+              return ""
+
+          def scan_timestamp(item):
+              for candidate in (
+                  item.get("completedDate"),
+                  item.get("completionDate"),
+                  item.get("modifiedDate"),
+                  item.get("updatedDate"),
+                  item.get("analysisDate"),
+                  item.get("scanDate"),
+                  item.get("createdDate"),
+                  nested_get(item, "scan", "completedDate"),
+                  nested_get(item, "scan", "modifiedDate"),
+              ):
+                  if candidate:
+                      return str(candidate)
+              return ""
+
+          candidates = []
+          for item in items:
+              item_release_name = scan_release_name(item)
+              item_release_id = scan_release_id(item)
+              item_scan_id = scan_id(item)
+              if item_release_name != release_name or not item_release_id or not item_scan_id:
+                  continue
+              candidates.append(
+                  {
+                      "scan_id": item_scan_id,
+                      "release_id": item_release_id,
+                      "release_name": item_release_name,
+                      "timestamp": scan_timestamp(item),
+                  }
+              )
+
+          if not candidates:
+              sample = [
+                  {
+                      "scan_id": scan_id(item),
+                      "release_id": scan_release_id(item),
+                      "release_name": scan_release_name(item),
+                      "timestamp": scan_timestamp(item),
+                  }
+                  for item in items[:5]
+              ]
+              raise SystemExit(
+                  f"No FoD scans found for app '{app_name}' and release '{release_name}'. "
+                  f"Sample scan records: {json.dumps(sample)}"
+              )
+
+          def sort_key(candidate):
+              try:
+                  scan_num = int(candidate["scan_id"])
+              except ValueError:
+                  scan_num = -1
+              return (candidate["timestamp"], scan_num)
+
+          candidates.sort(key=sort_key, reverse=True)
+
+          with open(candidates_file, "w", encoding="utf-8") as fh:
+              json.dump(candidates, fh)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"scan_id={candidates[0]['scan_id']}\n")
+              fh.write(f"release_id={candidates[0]['release_id']}\n")
+              fh.write(f"scan_count={len(candidates)}\n")
+          PY
 
       - name: Apply Aviator remediations from FoD
         id: apply
+        env:
+          FOD_SCAN_CANDIDATES_FILE: ${{ runner.temp }}/fod-scan-candidates.json
         run: |
+          python <<'PY' > "$RUNNER_TEMP/fod-scan-candidates.txt"
+          import json
+          import os
+
+          with open(os.environ["FOD_SCAN_CANDIDATES_FILE"], "r", encoding="utf-8") as fh:
+              candidates = json.load(fh)
+
+          for candidate in candidates:
+              print(f"{candidate['scan_id']} {candidate['release_id']}")
+          PY
+
           set +e
-          fcli fod aviator apply-remediations \
-            --rel "${{ steps.fod.outputs.release_id }}" \
-            --source-dir "$GITHUB_WORKSPACE" \
-            2>&1 | tee "$RUNNER_TEMP/fod-aviator-remediation.log"
-          status=${PIPESTATUS[0]}
+          while read -r scan_id release_id; do
+            [ -n "$scan_id" ] || continue
+            echo "Trying FoD scan ${scan_id} on release ${release_id}"
+
+            fcli fod aviator apply-remediations \
+              --rel "${release_id}" \
+              --source-dir "$GITHUB_WORKSPACE" \
+              2>&1 | tee "$RUNNER_TEMP/fod-aviator-remediation.log"
+            status=${PIPESTATUS[0]}
+
+            if [ "$status" -eq 0 ]; then
+              echo "remediations_available=true" >> "$GITHUB_OUTPUT"
+              echo "selected_scan_id=${scan_id}" >> "$GITHUB_OUTPUT"
+              echo "selected_release_id=${release_id}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if grep -q "does not contain remediations.xml file" "$RUNNER_TEMP/fod-aviator-remediation.log"; then
+              echo "FoD scan ${scan_id} did not contain remediations.xml; trying an older scan."
+              continue
+            fi
+
+            exit "$status"
+          done < "$RUNNER_TEMP/fod-scan-candidates.txt"
           set -e
 
-          if [ "$status" -eq 0 ]; then
-            echo "remediations_available=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if grep -q "does not contain remediations.xml file" "$RUNNER_TEMP/fod-aviator-remediation.log"; then
-            echo "No Aviator remediation bundle is available for FoD release ${{ steps.fod.outputs.release_id }} yet."
-            echo "remediations_available=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          exit "$status"
+          echo "No Aviator remediation bundle was available for any FoD scan on release ${GITHUB_REF_NAME}."
+          echo "remediations_available=false" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Check whether remediation changed files
         id: changes
@@ -162,7 +311,8 @@ jobs:
 
             Application: ${{ github.repository }}
             Release: ${{ github.ref_name }}
-            FoD Release ID: ${{ steps.fod.outputs.release_id }}
+            FoD Scan ID: ${{ steps.apply.outputs.selected_scan_id || steps.fod.outputs.scan_id }}
+            FoD Release ID: ${{ steps.apply.outputs.selected_release_id || steps.fod.outputs.release_id }}
 
             Automated validation completed before this PR was created:
             - Git diff validation
