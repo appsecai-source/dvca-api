@@ -1,14 +1,86 @@
-name: Fortify FoD Aviator Auto Remediation
+name: Fortify FoD Scan and Aviator Auto Remediation
 
 on:
+  push:
+    branches: [main, dev]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE'
+      - '.gitignore'
+      - 'LICENSE'
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE'
+      - '.gitignore'
+      - 'LICENSE'
   workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+  security-events: write
+
+concurrency:
+  group: fortify-${{ github.workflow }}-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      security-events: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore ./dvcsharp-core-api.csproj
+
+      - name: Build application binaries for FoD packaging
+        run: dotnet build ./dvcsharp-core-api.csproj --configuration Release --no-restore
+
+      - name: Run FoD SAST, SCA, and Aviator scan
+        uses: fortify/github-action@v3
+        env:
+          FOD_URL: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          FOD_TENANT: ${{ vars.FOD_TENANT || '' }}
+          FOD_RELEASE: ${{ format('{0}:{1}', github.repository, github.head_ref || github.ref_name) }}
+          DO_SETUP: ${{ vars.FOD_DO_SETUP || 'true' }}
+          SAST_ASSESSMENT_TYPE: ${{ vars.FOD_SAST_ASSESSMENT_TYPE || '' }}
+          DO_AVIATOR_AUDIT: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
+          OVERRIDE_SAST_SETTINGS: ${{ vars.FOD_OVERRIDE_SAST_SETTINGS || 'false' }}
+          SETUP_EXTRA_OPTS: ${{ vars.FOD_SETUP_EXTRA_OPTS || '' }}
+          FCLI_BOOTSTRAP_VERSION: ${{ vars.FCLI_BOOTSTRAP_VERSION || '' }}
+          PACKAGE_EXTRA_OPTS: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '-bt dotnet -bf dvcsharp-core-api.csproj' }}
+          DO_SAST_SCAN: 'true'
+          DO_SCA_SCAN: 'true'
+          DO_WAIT: ${{ vars.FOD_DO_WAIT || 'true' }}
+          DO_SAST_WAIT: ${{ vars.FOD_DO_WAIT || 'true' }}
+          DO_JOB_SUMMARY: ${{ vars.FOD_DO_JOB_SUMMARY || 'false' }}
+          DO_RELEASE_SUMMARY: ${{ vars.FOD_DO_JOB_SUMMARY || 'false' }}
+          DO_EXPORT: 'false'
+          DO_SAST_EXPORT: 'false'
+          DO_PR_COMMENT: ${{ github.event_name == 'pull_request' }}
+
   remediate:
+    needs: scan
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
